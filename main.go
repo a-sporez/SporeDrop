@@ -2,52 +2,125 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
-	"strings"
+	"os"
+
+	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 )
 
 // incoming message structure
-type Message struct {
+type ChatInput struct {
 	Message string `json:"message"`
 }
 
 // outgoing reply structure
-type Response struct {
+type ChatOutput struct {
 	Reply string `json:"reply"`
 }
 
-func chat_handler(w http.ResponseWriter, r *http.Request) {
-	var msg Message
+type MistralRequest struct {
+	Messages    []Message `json:"messages"`
+	Temperature float32   `json:"temperature"`
+	Stream      bool      `json:"stream"`
+}
 
-	// decode incoming json
-	err := json.NewDecoder(r.Body).Decode(&msg)
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type MistralResponse struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
+func init() {
+	err := godotenv.Load()
 	if err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
-		return
+		log.Println("No .env file found; using system env vars")
 	}
-
-	userMsg := strings.ToLower(msg.Message)
-	reply := "I'm not sure what you mean by that."
-
-	// keyword based logic
-	switch {
-	case strings.Contains(userMsg, "hello"):
-		reply = "Hello! How can I help you?"
-	case strings.Contains(userMsg, "bye"):
-		reply = "Goodbye!"
-	case strings.Contains(userMsg, "help"):
-		reply = "Yes! I am here to assist you!"
-	}
-
-	// send JSON response
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(Response{Reply: reply})
 }
 
 func main() {
-	http.HandleFunc("/chat", chat_handler)
-	log.Println("chatbot running on port 8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Println("chatbot API running on :" + port)
+
+	router := gin.Default()
+	router.POST("/chat", handleChat)
+	router.Run(":" + port)
+
+}
+
+func handleChat(c *gin.Context) {
+	var input ChatInput
+	if err := c.BindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	reply, err := callMistral(input.Message)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Mistral error"})
+		return
+	}
+
+	c.JSON(http.StatusOK, ChatOutput{Reply: reply})
+}
+
+func callMistral(userMessage string) (string, error) {
+	mistralURL := os.Getenv("MISTRAL_URL")
+	bearerToken := os.Getenv("MISTRAL_TOKEN") // this is safer than hardcoding
+
+	if mistralURL == "" || bearerToken == "" {
+		log.Fatal("Missing MISTRAL_URL or MISTRAL_TOKEN in .env")
+	}
+
+	payload := MistralRequest{
+		Messages: []Message{
+			{Role: "user", Content: userMessage},
+		},
+		Temperature: 0.7,
+		Stream:      false,
+	}
+
+	jsonData, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest("POST", mistralURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	log.Printf("Mistral response body: %s", body)
+
+	var result MistralResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", err
+	}
+
+	if len(result.Choices) > 0 {
+		return result.Choices[0].Message.Content, nil
+	}
+
+	return "{no reply}", nil
 }

@@ -19,3 +19,9 @@
 
 # Go workspace file
 go.work
+.env
+
+# vscode
+.vscode/
+settings.json
+/.vscode
